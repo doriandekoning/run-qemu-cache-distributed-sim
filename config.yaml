@@ -1,0 +1,16 @@
+usepipe: true
+benchmark: "blackscholes"
+cr3filepath: "/home/dorian/thesis/thesis/qemu/cr3_output"
+pgtabledumppath: "/media/ssd/pgtable_dump"
+cachesimulator:
+  run: true
+  path: "/home/dorian/go/src/github.com/doriandekoning/functional-cache-simulator/c/bin/simulator"
+  n: 4
+qemu:
+  run: true
+  path: "/home/dorian/thesis/qemutracingphysmem/qemu/build/x86_64-softmmu/qemu-system-x86_64"
+  drive: "/media/ssd/disks/attempt2.qcow2"
+  kernel: "/home/dorian/thesis/linux-5.0/arch/x86_64/boot/bzImage"
+  events: "/home/dorian/thesis/thesis/qemu/cr3event"
+  trace: "/media/ssd/trace"
+#  trace: "/dev/null"
