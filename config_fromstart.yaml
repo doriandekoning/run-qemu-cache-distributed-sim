@@ -1,8 +1,6 @@
 usepipe: true
 benchmark: "blackscholes"
-cr3filepath: "/home/dorian/thesis/thesis/qemu/cr3_output"
-crvaluespath: "/home/dorian/thesis/thesis/crvalues"
-pgtabledumppath: "/media/ssd/pgtable_dump"
+tracing_from_start: true
 cachesimulator:
   run: true
   path: "/home/dorian/go/src/github.com/doriandekoning/functional-cache-simulator/bin/simulator"
@@ -12,7 +10,6 @@ qemu:
   path: "/home/dorian/thesis/qemutracingphysmem/qemu/build/x86_64-softmmu/qemu-system-x86_64"
   drive: "/media/ssd/disks/parsec_disposable.img"
   kernel: "/home/dorian/thesis/linux-5.0/arch/x86_64/boot/bzImage"
-  events: "/home/dorian/thesis/thesis/qemu/cr3event"
+  events: "/home/dorian/thesis/thesis/qemu/events_mem_cr3"
   trace: "/media/ssd/trace"
-  num_cores: 2
-#  trace: "/dev/null"
+  

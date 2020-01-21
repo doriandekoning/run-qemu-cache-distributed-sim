@@ -1,0 +1,4 @@
+guest_update_cr
+guest_mem_store_before_exec
+guest_mem_load_before_exec
+guest_start_exec_tb
