@@ -1,31 +1,34 @@
 package main
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
+
 	expect "github.com/Netflix/go-expect"
+	semaphore "github.com/dangerousHobo/go-semaphore"
 	"gopkg.in/yaml.v2"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"regexp"
-	"strings"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 )
 
 type QemuConfig struct {
-	Run             bool
-	Path            string
-	Drive           string
-	Kernel          string
-	Events          string
-	Trace           string
-	NumCores        string `yaml:"num_cores"`
-	TraceMappingOut string `yaml:"trace_mapping_out"`
+	Run                    bool
+	Path                   string
+	Drive                  string
+	Kernel                 string
+	Events                 string
+	Trace                  string
+	NumCores               string `yaml:"num_cores"`
+	TraceEventIDMappingOut string `yaml:"trace_event_id_mapping"`
+	QmpTelnetPort          int    `yaml:"qmp_telnet_port"`
+	MemorySize             string `yaml:"memory_size"`
 }
 
 type CacheSimulatorConfig struct {
@@ -37,15 +40,17 @@ type CacheSimulatorConfig struct {
 }
 
 type Config struct {
-	Benchmark        string
-	BenchmarkSize    string `yaml:"benchmark_size"`
+	Benchmark     string
+	BenchmarkSize string `yaml:"benchmark_size"`
 	// CR3filePath      string
 	// PgTableDumpPath  string
 	CacheSimulator   CacheSimulatorConfig
 	Qemu             QemuConfig
-	// CRValuesPath     string
-	MemoryDumpPath string
-	TracingFromStart bool `yaml:"tracing_from_start"`
+	CRValuesPath     string `yaml:"cr_values_path"`
+	MemoryDumpPath   string `yaml:"memory_dump_path"`
+	TracingFromStart bool   `yaml:"tracing_from_start"`
+	MemrangePath     string `yaml:"mem_range_path"`
+	//Benchmark        string `yaml:"benchmark"`
 }
 
 func LoadConfig() *Config {
@@ -83,102 +88,155 @@ func LoadConfig() *Config {
 	if config.Benchmark == "" {
 		log.Fatalf("Benchmark not defined!")
 	}
+	if config.CRValuesPath == "" {
+		log.Fatalf("Crvalues path not set at cr_values_path")
+	}
 	return &config
 }
 
 func main() {
-	var cacheSimCMD *exec.Cmd
+	var cacheSimCMD exec.Cmd
 	config := LoadConfig()
-	//	if !config.Usepipe {
-	// _, err := os.Stat(config.PgTableDumpPath)
-	// if err != nil && os.IsNotExist(err) {
-	// 	err = os.MkdirAll(config.PgTableDumpPath, 0700)
-	// 	if err != nil {
-	// 		log.Fatal("Unable to create dir for pgtable dump: ", err)
-	// 	}
-	// } else if err != nil {
-	// 	log.Fatal("Unable to stat pgtable dump dir")
-	// }
+	var start_simulation_semaphore = &semaphore.Semaphore{}
+	err := start_simulation_semaphore.Open("/memtracing_start_sem", syscall.S_IRWXU, 0)
+	if err != nil {
+		log.Panic("Unable to open semaphore")
+	}
 
+	c, err := expect.NewConsole(expect.WithStdout(os.Stdout))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if config.Qemu.Run {
+		startQemu(c, &config.Qemu)
+		defer func() {
+			if config.Qemu.Run {
+				log.Println("Killing qemu!\n")
+				qemuKillCMD := exec.Command("./killqemu.sh")
+				runCMD(qemuKillCMD, true)
+			}
+		}()
+	}
 
+	if config.CacheSimulator.Run {
+		startCacheSimulator(&cacheSimCMD, config)
+	}
+	defer func() {
+		if config.CacheSimulator.Run {
+			log.Println("Killing cachesim!\n")
+			if cacheSimCMD.Process != nil {
+				err := cacheSimCMD.Process.Signal(syscall.SIGINT)
+				if err != nil {
+					log.Println("Unable to kill cachesim:", err)
+				}
+			}
+		}
+	}()
 
-	// c, err := expect.NewConsole(expect.WithStdout(os.Stdout))
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// if config.Qemu.Run {
-	// 	if config.CacheSimulator.Run {
-	// 		startCacheSimulator(cacheSimCMD, config)
-	// 	}
-	// 	defer func() {
-	// 		if config.CacheSimulator.Run {
-	// 			log.Println("Killing cachesim!\n")
-	// 			if cacheSimCMD.Process != nil {
-	// 				err = cacheSimCMD.Process.Signal(syscall.SIGINT)
-	// 				if err != nil {
-	// 					log.Println("Unable to kill cachesim:", err)
-	// 				}
-	// 			}
-	// 		}
+	log.Println("Sleeping!")
+	time.Sleep(1 * time.Second)
+
+	qmpConn := InitQMPConnection("/tmp/qemu-qmp")
+	ranges := qmpConn.InfoE820()
+	fmt.Printf("outputting memrange to: %s\n", config.MemrangePath)
+	f, err := os.Create(config.MemrangePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	str := fmt.Sprintf("%x\n", len(ranges))
+	n, err := f.Write([]byte(str))
+	if err != nil || n != len([]byte(str)) {
+		f.Close()
+		log.Fatal("Cannot write to memrange file!:", err)
+	}
+	for _, r := range ranges {
+		fmt.Printf("Range, start:%x, end: %x\n", r.Start, r.End)
+		str = fmt.Sprintf("%x-%x\n", r.Start, r.End)
+		n, err = f.Write([]byte(str))
+		if err != nil || n != len([]byte(str)) {
+			f.Close()
+			log.Fatal("Cannot write to memrange file!:", err)
+		}
+	}
+	f.Close()
+
+	time.Sleep(3 * time.Second)
+
+	log.Println("Waiting for login")
+	//c.ExpectString("localhost login:")
+	//c.SendLine("root")
+	c.ExpectString("ubuntu login:")
+
+	c.SendLine("ubuntu")
+	c.ExpectString("Password:")
+	//c.SendLine("")
+	c.SendLine("asdfqwer")
+	log.Println("Successfully logged in")
+	//	c.ExpectString("$ ")
+	c.ExpectString("$ ")
+	c.SendLine("cd parsec-3.0/")
+	c.ExpectString("$ ")
+	c.SendLine("source env.sh")
+	/*		c.SendLine("cat /proc/meminfo | head -n 1")
+			c.ExpectString("$ ")*/
+	//	c.SendLine("tar -xvf parsec-3.0/pkgs/apps/freqmine/inputs/input_simsmall.tar")
+	//	c.ExpectString("$ ")
+
+	time.Sleep(2 * time.Second)
+	c.ExpectString("$ ")
+	fmt.Println("Stopping")
+	qmpConn.Stop()
+	fmt.Println("Sleeping for some time!\n")
+	time.Sleep(2 * time.Second)
+	readCRValues(config.CRValuesPath)
+	for _, r := range ranges {
+		qmpConn.pmemsave(r.Start, r.End, fmt.Sprintf("%s-%x", config.MemoryDumpPath, r.Start))
+	}
+	//	time.Sleep(10 * time.Second) // Give pmemsave a bit of time to complete
+	qmpConn.SetTraceEvent("guest_update_cr", true)
+	qmpConn.SetTraceEvent("guest_mem_load_before_exec", true)
+	qmpConn.SetTraceEvent("guest_mem_store_before_exec", true)
+	qmpConn.SetTraceEvent("guest_start_exec_tb", true)
+	//	qmpConn.SetTraceEvent("guest_mem_before_exec", true)
+
+	start_simulation_semaphore.Post()
+	time.Sleep(20 * time.Second)
+	fmt.Println("Continueing")
+	fmt.Println("Started timing!\n")
+	qmpConn.Cont()
+	// if config.CacheSimulator.Run {
+	// 	go func() {
+	// 		cacheSimCMD.Wait()
+	// 		log.Println("Cachesim exitted after: ", time.Now().Sub(startTime))
+
 	// 	}()
-	// 	time.Sleep(3*time.Second)
-	// 	startQemu(c, &config.Qemu)
-	// 	defer func() {
-	// 		if config.Qemu.Run {
-	// 			log.Println("Killing qemu!\n")
-	// 			qemuKillCMD := exec.Command("./killqemu.sh")
-	// 			runCMD(qemuKillCMD, true)
-	// 		}
-	// 	}()
-	// 	log.Println("Sleeping!")
-	// 	time.Sleep(5 * time.Second)
-
-	// 	log.Println("Waiting for login")
-	// 	c.ExpectString("localhost login:")
-	// 	c.SendLine("root")
-	// 	c.ExpectString("Password:")
-	// 	c.SendLine("")
-	// 	log.Println("Successfully logged in")
-	// 	c.ExpectString("# ")
-	// 	c.SendLine("cd parsec-3.0/")
-	// 	c.ExpectString("# ")
-	// 	c.SendLine("source env.sh")
-	// 	c.ExpectString("# ")
-	// 	time.Sleep(2 * time.Second)
-	// 	if config.CacheSimulator.Run && !config.TracingFromStart {
-	// 		log.Println("Pausing QEMU to dump the pagetables the benchmark")
-	// 		runMonitorCMD("stop")
-	// 		runMonitorCMD("flush-simple-trace-file")
-	// 		time.Sleep(3 * time.Second) // Make sure all cr3 change events are received and written by input reader
-	// 		for _, cr3 := range readCR3s(config.CR3filePath) {
-	// 			if cr3 != "" {
-	// 				runMonitorCMD("dump-pagetable " + config.PgTableDumpPath + "/" + cr3 + " " + cr3)
-	// 			}
-	// 		}
-	// 		readCRValues(config.CRValuesPath)
-	// 	}
-	// 	log.Println("Enabling tracing")
-	// 	runCMD(exec.Command("./enabletracing.sh"), true)
-	// 	if config.CacheSimulator.Run && !config.TracingFromStart {
-	// 		runMonitorCMD("cont")
-	// 	}
-
-	// 	log.Printf("Enabled tracing and resumed simulator!\n")
-	// 	time.Sleep(1 * time.Second)
-
-	// 	startTime := time.Now()
-
-	// 	c.SendLine("parsecmgmt -a run -p " + config.Benchmark + " -i " + config.BenchmarkSize + " -n " + config.Qemu.NumCores + " -s \"echo 'Starting' && time\"")
-	// 	c.ExpectString("# ")
-	// 	log.Println("Time spend on benchmark: ", time.Now().Sub(startTime))
 	// }
+	fmt.Println("Starting benchmark!\n")
+	//	c.SendLine("parsecmgmt -a run -p " + config.Benchmark + " -i " + config.BenchmarkSize + " -n " + config.Qemu.NumCores + " -s \"echo 'Starting' && time\"")
+	c.SendLine("cd ~")
+	c.ExpectString("$ ")
+	//c.SendLine("./parsec-2.1/pkgs/kernels/streamcluster/inst/amd64-linux.gcc.pre/bin/streamcluster 10 20 128 16384 16384 1000 none output.txt 1") //Large
+	//	c.SendLine("./parsec-2.1/pkgs/kernels/streamcluster/inst/amd64-linux.gcc.pre/bin/streamcluster 10 20 32 4096 4069 1000 none output.txt 1") //Medium
+	//	c.SendLine("./parsec-2.1/pkgs/kernels/streamcluster/inst/amd64-linux.gcc.pre/bin/streamcluster 10 20 32 4096 4096 1000 none output.txt 1") // Small
+	//	c.SendLine("./parsec-2.1/pkgs/apps/blackscholes/inst/amd64-linux.gcc.pre/bin/blackscholes  1 in_16K.txt prices.txt") // Blackscholes medium
+	log.Println("Running benchmark:", config.Benchmark)
+	startTime := time.Now()
+	c.SendLine(config.Benchmark)
+	time.Sleep(1 * time.Second)
+	c.ExpectString("$ ")
+	fmt.Println("Time used by benchmark: ", time.Now().Sub(startTime))
+
+	//	qmpConn.SetTraceEvent("guest_update_cr", false)
+	//	qmpConn.SetTraceEvent("guest_mem_load_before_exec", false)
+	//	qmpConn.SetTraceEvent("guest_mem_store_before_exec", false)
+	//	qmpConn.SetTraceEvent("guest_start_exec_tb", false)
 }
 
 func startQemu(c *expect.Console, config *QemuConfig) *exec.Cmd {
 	log.Println("Using trace pipe:", config.Trace)
 	log.Printf("Starting qemu with %s cores\n", config.NumCores)
-	log.Println("./runqemu.sh", config.Path, config.Drive, config.Kernel, config.NumCores, config.Events, config.Trace)
-	cmd := exec.Command("./runqemu.sh", config.Path, config.Drive, config.Kernel, config.NumCores, config.Events, config.Trace)
+	log.Println("./runqemu.sh", config.Path, config.Drive, config.Kernel, config.NumCores, config.Events, config.Trace, config.MemorySize)
+	cmd := exec.Command("./runqemu.sh", config.Path, config.Drive, config.Kernel, config.NumCores, config.Events, config.Trace, config.MemorySize)
 	// qemuOptions := []string{
 	// 	"-drive", "file=" + config.Drive + ",format=qcow2",
 	// 	"-m", "12G", "-nographic",
@@ -194,23 +252,21 @@ func startQemu(c *expect.Console, config *QemuConfig) *exec.Cmd {
 
 	runCMDWithExec(cmd, c, false)
 	fmt.Println("Started qemu!\n")
+
 	return cmd
 }
 
 func startCacheSimulator(cacheSimCMD *exec.Cmd, config *Config) {
 	log.Println("Starting cache simulator!")
 	if config.CacheSimulator.Distributed && config.TracingFromStart {
-		cacheSimCMD = exec.Command("mpirun", "-v", "-np", strconv.Itoa(config.CacheSimulator.N), config.CacheSimulator.Path, "n", "n", config.Qemu.Trace)
+		*cacheSimCMD = *exec.Command("mpirun", "-v", "-np", strconv.Itoa(config.CacheSimulator.N), config.CacheSimulator.Path, "n", "n", config.Qemu.Trace)
 	} else if config.CacheSimulator.Distributed {
-		cacheSimCMD = exec.Command("mpirun", "-v", "-np", strconv.Itoa(config.CacheSimulator.N), config.CacheSimulator.Path, "y", "n", config.Qemu.Trace, config.PgTableDumpPath, config.CR3filePath, config.CRValuesPath, config.PgTableDumpPath)
+		cacheSimCMD = exec.Command("mpirun", "-v", "-np", strconv.Itoa(config.CacheSimulator.N), config.CacheSimulator.Path, config.Qemu.TraceEventIDMappingOut, "crvalues", config.Qemu.Trace, config.MemrangePath, "2", config.CacheSimulator.Output, config.MemoryDumpPath)
 	} else {
-		// gcc  -DSIMULATE_CACHE=1 -DSIMULATE_MEMORY=1 -DSIMULATE_ADDRESS_TRANSLATION=1  -I. simulator/simple/simulator.c pagetable/pagetable.c cache/*.c mappingreader/mappingreader.c pipereader/pipereader.c memory/memory.c control_registe
-		//	rs/control_registers.c -o bin/main && time bin/main mappingreader/trace_mapping pipe   /media/ssd/out
-		cacheSimCMD = exec.Command(config.CacheSimulator.Path, config.Qemu.TraceMappingOut, config.Qemu.Trace, config.CacheSimulator.Output, config.CR3filePath)
+		*cacheSimCMD = *exec.Command(config.CacheSimulator.Path, config.Qemu.TraceEventIDMappingOut, config.Qemu.Trace, config.CacheSimulator.Output, config.Qemu.NumCores, config.MemoryDumpPath, config.MemrangePath, config.CRValuesPath) //TODO add mem dump path
 	}
-	fmt.Println("Starting cache simulator:", strings.Join(cacheSimCMD.Args, " "))
 	runCMD(cacheSimCMD, false)
-	log.Println("Started cache simulator!")
+	log.Println("Started cache simulator!", cacheSimCMD)
 }
 
 func runCMDWithExec(cmd *exec.Cmd, c *expect.Console, wait bool) {
@@ -259,24 +315,25 @@ func readCRValues(path string) {
 		log.Fatal(err)
 	}
 
-	cpuRegex := regexp.MustCompile(`CPU#\d+-0x([0-9a-f]+)`)
+	fmt.Println(string(out))
+	cpuRegex := regexp.MustCompile(`CPU#(\d+)`)
 	crRegex := regexp.MustCompile(`CR\d=([0-9a-f]+)\s`)
 	cpus := cpuRegex.FindAllStringSubmatch(string(out), -1)
 	crs := crRegex.FindAllStringSubmatch(string(out), -1)
-	//	fmt.Printf("%#+v\n", crs)
+	fmt.Printf("%#+v\n", crs)
 	crIndex := 0
-	f, err := os.OpenFile(path, os.O_WRONLY, os.ModePerm)
+	fmt.Println("Writing cr values to:", path)
+	f, err := os.Create(path)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer f.Close()
-	//fmt.Printf("%#+v\n", cpus)
+	fmt.Println(cpus)
 	for i := range cpus {
 		_, err = f.Write([]byte(cpus[i][1] + "\n"))
 		if err != nil {
 			log.Fatal(err)
 		}
-		//fmt.Println(cpus[i][1])
 		for j := 0; j <= 4; j++ {
 			if j == 1 {
 				_, err = f.Write([]byte("0\n"))
@@ -285,7 +342,6 @@ func readCRValues(path string) {
 				}
 				continue
 			}
-			//fmt.Println(crs[crIndex][1])
 			_, err = f.Write([]byte(crs[crIndex][1] + "\n"))
 			if err != nil {
 				log.Fatal(err)
@@ -294,27 +350,4 @@ func readCRValues(path string) {
 		}
 	}
 	f.Sync()
-}
-
-func readCR3s(inputPath string) []string {
-	log.Println("Reading cr3 values at:", inputPath)
-	file, err := os.Open(inputPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	cr3s := map[uint64]string{}
-	var cr3 uint64
-	for err == nil {
-		err = binary.Read(file, binary.LittleEndian, &cr3)
-		cr3s[cr3] = strconv.FormatUint(cr3, 10)
-	}
-	if err != io.EOF {
-		fmt.Println("Error reading cr3 values:", err)
-	}
-	ret := []string{}
-	for _, value := range cr3s {
-		ret = append(ret, value)
-	}
-	log.Println(ret)
-	return ret
 }

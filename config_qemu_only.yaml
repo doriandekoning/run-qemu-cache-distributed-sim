@@ -1,25 +1,33 @@
-usepipe: true
-benchmark: "blackscholes"
-benchmark_size: "simlarge"
-cr3filepath: "/home/dorian/thesis/thesis/qemu/cr3_output"
-crvaluespath: "/home/dorian/thesis/thesis/crvalues"
-pgtabledumppath: "/media/ssd/pgtable_dump"
+#benchmark_size: "simsmall"
+memory_dump_path: "/media/ssd/gem5comparisontraces/gzip_qemu/memdump"
+#memory_dump_path: "/dev/null"
+cr_values_path: "/media/ssd/gem5comparisontraces/gzip_qemu/crvalues"
+#cr_values_path: "/dev/null"
+mem_range_path: "/media/ssd/gem5comparisontraces/gzip_qemu/memrange"
+#mem_range_path: "/dev/null"
+#benchmark: "./parsec-2.1/pkgs/apps/blackscholes/inst/amd64-linux.gcc.pre/bin/blackscholes 1 in_16K.txt prices.txt" # Blackscholes medium
+#benchmark: "./parsec-2.1/pkgs/apps/blackscholes/inst/amd64-linux.gcc.pre/bin/blackscholes 1 in_64K.txt prices.txt" # Blackscholes large
+
+#benchmark: "./parsec-2.1/pkgs/kernels/streamcluster/inst/amd64-linux.gcc.pre/bin/streamcluster 10 20 32 4096 4069 1000 none output.txt 1" # Streamcluster small
+#benchmark: "./parsec-2.1/pkgs/kernels/streamcluster/inst/amd64-linux.gcc.pre/bin/streamcluster 10 20 64 8192 8192 1000 none output.txt 1" # Streamcluster simmedium
+#benchmark: "./parsec-2.1/pkgs/apps/freqmine/inst/amd64-linux.gcc.pre/bin/freqmine kosarak_500k.dat 410" # Freqmine medium
+#benchmark: "parsecmgmt -i simmedium -n 1 -a run -p freqmine"
+#benchmark: "./parsec-3.0/pkgs/apps/freqmine/inst/amd64-linux.gcc/bin/freqmine kosarak_250k.dat 220"
+#benchmark: "cd parsec-3.0 && source env.sh && parsecmgmt -i simdev -n 4 -a run -p freqmine"
+benchmark: "sudo tar -czvf kernel.tar /boot/vmlinuz-4.15.0-76-generic && tar -I pigz -xvf kernel.tar -C out"
 cachesimulator:
   run: false
 qemu:
   run: true
   path: "/home/dorian/thesis/qemutracingphysmem/qemu/build/x86_64-softmmu/qemu-system-x86_64"
-  drive: "/media/ssd/disks/parsec_disposable.img"
+  drive: "/media/ssd/disks/ubuntu-bionic-parsec.img"
+#  drive: "/media/ssd/disks/alpine_installed.img"
   kernel: "/home/dorian/thesis/linux-5.0/arch/x86_64/boot/bzImage"
-#  events: "/home/dorian/thesis/thesis/qemu/cr3event"
-#  events:  "/home/dorian/thesis/qemutracingphysmem/qemu/build/trace-events-all"
-  events: "/home/dorian/go/src/github.com/doriandekoning/run-qemu-cache-distributed-sim/no_events"
 #  events: "/home/dorian/go/src/github.com/doriandekoning/run-qemu-cache-distributed-sim/all_needed_events"
-  trace: "/media/ssd/testtrace"
+  events: "/home/dorian/go/src/github.com/doriandekoning/run-qemu-cache-distributed-sim/no_events"
+#  trace: "/media/ssd/gem5comparisontraces/gzip_4_8g_all_events_kernel/trace
+  trace: "/media/ssd/gem5comparisontraces/gzip_qemu/trace"
 #  trace: "/dev/null"
-  num_cores: 2
-<<<<<<< Updated upstream
-  num_cores: 2
-=======
->>>>>>> Stashed changes
-  qmp_telnet_port: 4444
+  num_cores: 1
+  memory_size: "8G"
+
